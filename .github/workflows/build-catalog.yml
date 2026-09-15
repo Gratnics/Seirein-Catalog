@@ -1,0 +1,58 @@
+name: Build catalog
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Rebuild catalog.json from models/
+        run: python3 scripts/build_catalog.py
+
+      - name: Verify committed catalog.json is up to date
+        run: |
+          if ! git diff --exit-code -- catalog.json; then
+            echo "::error::catalog.json is out of date. Run 'python3 scripts/build_catalog.py' and commit the result."
+            exit 1
+          fi
+
+      - name: Validate catalog shape
+        run: |
+          python3 - <<'PY'
+          import json
+          categories = {"image", "embedding", "speech-input", "speech"}
+          common_required = {"model", "pricing", "sources"}
+          image_required = {"resolution", "input", "settings", "output"}
+          data = json.load(open("catalog.json", encoding="utf-8"))
+          assert isinstance(data, dict), "catalog must be a category-keyed object"
+          assert set(data) == categories, f"unexpected categories: {sorted(data)}"
+
+          total = 0
+          for category, entries in data.items():
+              assert isinstance(entries, list), f"{category}: entries must be a list"
+              for entry in entries:
+                  total += 1
+                  source = entry.get("_source_file", "<unknown source>")
+                  missing = common_required - entry.keys()
+                  assert not missing, f"{source}: missing {sorted(missing)}"
+                  assert entry.get("_category") == category, f"{source}: incorrect _category"
+                  assert entry["model"].get("provider"), f"{source}: missing model.provider"
+                  urls = entry["sources"].get("urls")
+                  assert isinstance(urls, list) and urls, f"{source}: no source urls"
+                  assert all(isinstance(url, str) and url for url in urls), f"{source}: invalid source url"
+                  if category == "image":
+                      missing = image_required - entry.keys()
+                      assert not missing, f"{source}: missing {sorted(missing)}"
+
+          assert total >= 10, "catalog must contain at least 10 entries"
+          print(f"OK: {total} entries across {len(data)} categories")
+          PY
